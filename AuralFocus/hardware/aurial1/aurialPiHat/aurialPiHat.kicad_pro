@@ -652,6 +652,30 @@
     [
       "e63e39d7-6ac0-4ffd-8aa3-1841a4541b55",
       "Root"
+    ],
+    [
+      "1ca86ce3-c591-47d8-90be-fb7de6d60980",
+      "Mic_Left_1"
+    ],
+    [
+      "20e07c01-b749-4b25-bdc8-d94f1bbf0a72",
+      "Mic_Left_2"
+    ],
+    [
+      "da85fa71-3176-451d-84a2-37e2800c9a49",
+      "Mic_Left_3"
+    ],
+    [
+      "ef9e559e-7864-48ea-8196-97fd83e6faa6",
+      "Mic_Right_1"
+    ],
+    [
+      "3d7ec73c-795f-4e12-b62b-b53fa2bc33f9",
+      "Mic_Right_2"
+    ],
+    [
+      "9b75d309-c9a3-4c4d-aba2-4e65fd1592b2",
+      "Mic_Roght_3"
     ]
   ],
   "text_variables": {}
