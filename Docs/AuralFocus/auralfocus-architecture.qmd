@@ -1,168 +1,28 @@
-# Superhuman Hearing System: Technical Analysis and Architecture
 
-This document presents the technical analysis and proposed architecture for an artificial hearing system with capabilities that approach and in some aspects surpass human audition. The system employs six digital **MEMS** microphones organized in two blocks of three elements each, enabling three-dimensional spatial localization of sound sources with extended dynamic range and advanced real-time digital signal processing capabilities.
+# AuralFocus Architecture
+This section details the architecture of the AuralFocus system, encompassing hardware selection, signal acquisition, power management, printed circuit board design, and digital signal processing algorithms. Each subsection provides in-depth analysis and rationale for design choices made to meet the project's stringent requirements for low-latency, high-fidelity spatial audio capture and processing.
 
-The central objective is to create a device capable of identifying the origin of sound sources with angular resolution of three to five degrees, recording high-quality audio across the full audible spectrum, and detecting sporadic acoustic events such as explosions and aircraft with sub-20 millisecond latency. The architecture adopts an all-digital approach using [**I**nter-**I**C **S**ound, **I²S** ou **P**ulse **D**ensity **M**odulation, **PDM** MEMS](https://www.sameskydevices.com/blog/pdm-vs-i2s-comparing-digital-interfaces-in-mems-microphones?srsltid=AfmBOorL6m9D9GzbkECx26VwfIj0ALQLnurtXjhKOByXlG0fRxHb6ecI) microphones, which significantly simplifies the analog design while maintaining professional-grade audio quality and reducing bill-of-materials cost to approximately sixty dollars.
+## Engineering Rationale: ESP32-P4 vs. STM32H7
 
-## Fundamentals: Comparison Between Auditory Systems
+My first impulse was to use the ESP32-P4, however, a deeper architectural analysis revealed that the initial cost advantages of the Espressif SoC would be negated by increased hardware complexity and potential risks to signal integrity. While the dual-core RISC-V architecture running at 400 MHz is impressive on paper, the specific requirements of a six-channel PDM microphone array for precise sound source localization align far better with the specialized peripherals found in the STM32H7 series. I feel this pain in my bones.
 
-To understand the project requirements and design decisions, we begin by analyzing the differences between human hearing, canine hearing, and the proposed system. This comparative analysis reveals both the biological limitations we seek to overcome and the engineering constraints that define practical boundaries.
+### The PDM Interface and Hardware Filtering
+The most significant technical differentiator is the method of handling Pulse Density Modulation (PDM) data. The project relies on PDM microphones for their noise immunity and simplicity. The STM32H753 features the **DFSDM** (Digital Filter for Sigma-Delta Modulators) peripheral, a dedicated hardware block designed specifically to generate clock signals, receive 1-bit bitstreams, and perform decimation and filtering in hardware. This allows the capture of six synchronous audio channels directly into memory via DMA with virtually no CPU overhead.
 
-### Human Auditory Characteristics
+In contrast, utilizing the ESP32-P4 for the same task introduces unnecessary friction. While the P4 supports PDM, efficiently managing six synchronized channels typically requires significant software intervention for decimation or restricts the clock topology. To achieve the same "clean" integration as the STM32, the ESP32 implementation would likely require external codecs or complex software decimation loops that consume valuable processing cycles needed for the beamforming algorithms.
 
-The human auditory system presents well-defined characteristics that have been extensively studied in psychoacoustic research. The audible frequency band extends from $20\text{Hz}$ to approximately $20\text{kHz}$ in young adults, though this upper limit degrades with age, typically reaching only $12$ to $15\text{kHz}$ by age sixty. Maximum sensitivity occurs in the range between $2\text{kHz}$ and $4\text{kHz}$, which corresponds to the fundamental frequencies and first formants of human speech, reflecting evolutionary optimization for verbal communication.
+### Clock Precision and Spatial Localization
+For a system designed to detect the angle of arrival of sound waves, the stability of the audio clock is not merely a matter of fidelity but of geometric accuracy. Sound source localization algorithms, such as GCC-PHAT, rely on minute phase differences between microphones. The STM32H7 series includes dedicated audio PLLs known for low jitter, allowing the microcontroller to act as a reliable clock master for the array.
 
-The dynamic range of human hearing, measured as the difference between the threshold of hearing and the threshold of pain, reaches approximately $120\text{dB}$. This remarkable range allows us to perceive sounds from the faint rustle of leaves at 10 dB **SPL** (**S**ound **P**ressure **L**evel) to the roar of jet engines at $130\text{dB}$ **SPL**. However, this sensitivity comes with vulnerability to acoustic trauma from prolonged exposure to high-intensity sounds above $85\text{dB}$ **SPL**.
+The ESP32 architecture historically exhibits higher internal PLL jitter, which introduces phase noise. While tolerable for standard voice recording, this phase noise translates directly into angular error in a compact beamforming array. Mitigating this on the ESP32-P4 would require inverting the clock topology to use an external high-precision crystal oscillator as the master, forcing the MCU into slave mode. This adds components to the Bill of Materials and complicates the PCB routing, whereas the STM32 handles this natively and robustly.
 
-Human spatial localization capability depends fundamentally on two binaural mechanisms that exploit the separation between our ears. The first mechanism is **I**nteraural **T**ime **D**ifference, **ITD**, which represents the difference in sound arrival time between the two ears. For a sound source positioned laterally, considering the typical interaural separation of approximately $17\text{cm}$ in adult humans, we can calculate the maximum **ITD**:
+### Development Ecosystem and PCB Simplicity
+The choice of the STM32H7 enables a direct "star" topology where the microcontroller connects directly to the microphones without intermediate silicon. This results in the cleanest possible HAT layout, reducing the risk of electromagnetic interference and minimizing points of failure. Furthermore, the firmware development benefits from the maturity of the ARM Cortex-M7 ecosystem, specifically the CMSIS-DSP libraries which offer highly optimized, battle-tested floating-point math functions essential for the real-time FFTs and correlation matrices used in the project. Porting these complex DSP chains to the newer RISC-V vector extensions represents a schedule risk that outweighs the unit cost savings of the processor.
 
-$$\text{**ITD**}_{\text{max}} = \frac{d}{v_{\text{sound}}} = \frac{0.17 \text{ m}}{343 \text{ m/s}} \approx 495 \text{ μs}$$
 
-This half-millisecond time difference is remarkably small, yet the human auditory system can detect differences as small as 10 microseconds, corresponding to angular discrimination of approximately one to two degrees in the frontal hemisphere. The sensitivity to **ITD** is greatest for frequencies below $1.5\text{kHz}$, where phase information remains unambiguous across the entire audible range.
+## Acquisition System Architecture
 
-The second mechanism is **I**nteraural **L**evel **D**ifference, **ILD**, which represents the difference in sound intensity between the ears due to the acoustic shadow cast by the head. This effect becomes significant when the wavelength of sound is smaller than or comparable to head dimensions. For a spherical head of approximately $18\text{cm}$ diameter, this occurs at frequencies above approximately $2\text{kHz}$:
-
-$$f_{\text{ILD}} = \frac{v_{\text{sound}}}{\pi d_{\text{head}}} = \frac{343 \text{ m/s}}{\pi \times 0.18 \text{ m}} \approx 607 \text{ Hz}$$
-
-Above this frequency, the head increasingly attenuates sound reaching the far ear, creating level differences that can exceed 20 dB for pure lateral sources at high frequencies. The brain integrates both **ITD** and **ILD** cues to create a robust spatial representation, with **ITD** dominating at low frequencies and **ILD** at high frequencies.
-
-Human angular resolution varies significantly with direction. In the frontal region, where both ears receive similar stimulation and head movements can disambiguate front-back confusions, we achieve resolution of approximately one degree. This exceptional acuity degrades to approximately $10$ to $15$ degrees in lateral and posterior regions, where cone of confusion effects and reduced binaural information limit performance. Figura @fig-human-auditory illustrates these concepts.
-
-:::{#fig-human-auditory
-[Illustration of the human auditory system showing the 17cm interaural separation, with visualization of sound waves arriving from different angles and visual indication of **ITD** and **ILD** mechanisms](../images/human_hearing.webp){#fig-human-auditory}
-:::
-
-### Canine Auditory Characteristics
-
-Canine hearing presents characteristics that make it superior to human hearing in specific aspects, reflecting evolutionary adaptations to different ecological niches. The frequency band extends from approximately $40\text{Hz}$ to $60\text{kHz}$, with some breeds capable of detecting frequencies approaching $65\text{kHz}$. This extended high-frequency response enables dogs to perceive ultrasonic vocalizations from prey animals and potentially detect some electronic devices that emit ultrasonic noise.
-
-Maximum sensitivity occurs between $8\text{kHz}$ and $16\text{kHz}$, approximately one octave above peak human sensitivity. This shift reflects optimization for detecting higher-pitched sounds, including rodent vocalizations and rustling movements in vegetation. The dynamic range is similar to humans at approximately $100\text{dB}$, though dogs show greater sensitivity to faint sounds, with hearing thresholds $4$ to $6\text{dB}$ lower than human thresholds across most of the audible spectrum.
-
-The separation between canine ears varies considerably with breed, typically ranging from $5\text{cm}$ in small breeds to $10\text{cm}$ in large breeds. Although smaller than human interaural separation, dogs compensate through independent pinnae mobility. Each external ear can rotate through approximately $180$ degrees under precise muscular control, allowing dogs to actively scan the acoustic environment and effectively increase their spatial sampling aperture. This mobility provides dogs with dynamic beamforming capability that humans lack, partially offsetting the geometric disadvantage of smaller baseline.
-
-Canine angular resolution in azimuth is estimated at approximately $5$ degrees under optimal conditions, somewhat inferior to frontal human resolution but superior to human performance in lateral directions. The ability to rapidly orient pinnae toward sound sources provides dogs with faster spatial acquisition than humans, who must rely primarily on head movements for spatial disambiguation.
-
-### Proposed System Specifications
-
-The system we are designing seeks to combine the best characteristics of biological auditory systems while adding capabilities enabled by digital signal processing that have no biological analogue. The design philosophy emphasizes practical utility over theoretical perfection, focusing on capabilities that provide clear value for the intended applications of sound source localization, event detection, and high-quality audio recording.
-
-The useful frequency band will extend from $20\text{Hz}$ to $20\text{kHz}$, covering the complete audible range with flat response. While this lacks the ultrasonic extension of canine hearing, it provides complete coverage of acoustically relevant content for our target applications. The vast majority of informative content in explosions, aircraft noise, and speech occurs below $10\text{kHz}$, with harmonics extending to $20\text{kHz}$. Even for ultrasonic events such as bat echolocation or pneumatic leaks, the presence of harmonics within the audible band often provides sufficient detection capability.
-
-The target dynamic range is $120\text{dB}$, matching human capability and allowing capture of sounds from very weak ($20\text{dB **SPL**}$, equivalent to a quiet room) to extremely intense ($140\text{dB **SPL**}$, near aircraft engines). The frequency response will be optimized to remain flat within ±$2\text{dB}$ from $100\text{Hz}$ to $16\text{kHz}$, degrading gradually to ±$3\text{dB}$ at $20\text{kHz}$, providing faithful representation of sound sources without coloration.
-
-The target angular resolution is $3$ to $5$ degrees in azimuth and $5$ to $10$ degrees in elevation. Although the system lacks physical mobility like canine pinnae, we compensate through digital beamforming, which allows electronically steering array sensitivity across the entire spatial hemisphere with millisecond update rates. This provides spatial tracking capability that exceeds biological systems for rapidly moving sources.
-
-The system latency target is less than $20\text{ms}$ from acoustic event to digital output, enabling real-time monitoring and triggering applications. Processing will occur entirely on the embedded microcontroller, eliminating dependence on external computing resources and enabling standalone operation.
-
-## Microphone Array Geometry
-
-The choice of microphone array geometry fundamentally determines the spatial localization capabilities and dictates many subsequent design decisions. The proposed configuration consists of two blocks of three microphones each, arranged vertically and separated horizontally, creating what we term a binaural array architecture.
-
-### Topology and Dimensions **TODO: New Topology with canine inspiration**
-
-Each vertical block contains three microphones uniformly spaced by 15 millimeters center-to-center, resulting in a total aperture of 30 millimeters per block. The two blocks are separated horizontally by a distance of 100 millimeters, measured between the center microphones of each block. This creates a configuration that replicates the essential geometry of binaural hearing while adding a vertical dimension absent in simple two-microphone systems.
-
-This geometry was selected through iterative analysis of several competing requirements. First, the vertical arrangement of microphones in each block enables beamforming in the elevation plane through delay-and-sum or more sophisticated adaptive techniques. Second, the horizontal separation between blocks provides sufficient baseline for exploiting both **ITD** and ILD cues to determine azimuth, similar to biological binaural hearing. Third, the compact overall dimensions (100 mm × 30 mm) permit mounting on a single printed circuit board without mechanical complexity.
-
-The choice of 15 millimeter vertical spacing represents a compromise between spatial resolution and aliasing. Tighter spacing would reduce aliasing frequency but decrease angular resolution. Wider spacing would improve resolution but introduce ambiguities at lower frequencies. The selected spacing provides acceptable performance across the frequency range of interest.
-
-The 100 millimeter horizontal separation was chosen to approximate the effective acoustic baseline of small animals while remaining compatible with standard **PCB** manufacturing. This separation provides **ITD** values up to approximately 290 microseconds for pure lateral sources, sufficient for unambiguous localization using correlation-based methods across the full audible band.
-
-**[SVG DIAGRAM 3: Front and top view of the array showing the positions of the 6 microphones. Front view shows the two vertical blocks separated by 10cm. Top view shows the 10cm baseline. Include coordinate system with x, y, z axes clearly marked and microphone numbering]**
-
-### Spacing Calculation and Spatial Aliasing 
-
-A critical concept in microphone array design is spatial aliasing, directly analogous to temporal aliasing in discrete-time signal processing. When the spacing between array elements exceeds half the wavelength of the incoming sound, ambiguities arise in determining the direction of arrival. Multiple spatial angles can produce identical phase relationships across the array, creating what are termed grating lobes in the array response pattern.
-
-To avoid spatial aliasing, the spacing between adjacent elements must satisfy:
-
-$$d < \frac{\lambda_{\text{min}}}{2} = \frac{v_{\text{sound}}}{2 f_{\text{max}}}$$
-
-For our maximum frequency of interest of 20 kHz, this yields:
-
-$$\lambda_{\text{min}} = \frac{343 \text{ m/s}}{20000 \text{Hz}} = 17.15 \text{mm}$$
-
-Therefore, the maximum spacing to avoid aliasing is:
-
-$$d_{\text{max}} = \frac{17.15 \text{mm}}{2} = 8.58 \text{mm}$$
-
-Our chosen spacing of 15 millimeters exceeds this limit by a factor of 1.75, which means we will experience spatial aliasing above approximately:
-
-$$f_{\text{aliasing}} = \frac{v_{\text{sound}}}{2 \times d} = \frac{343 \text{ m/s}}{2 \times 0.015 \text{ m}} \approx 11.4 \text{kHz}$$
-
-This represents a conscious design trade-off. Spatial aliasing above 11.4 kHz creates ambiguities in direction of arrival estimation, but several factors mitigate this limitation. First, most acoustic events of interest (speech, explosions, vehicle noise) contain their principal informative content below 10 kHz. Second, even when aliasing occurs, the energy detection and beamforming gain remain valid, only the precise angle-of-arrival becomes ambiguous. Third, the horizontal baseline of 100 millimeters provides an independent measurement at a different spatial frequency that helps resolve some ambiguities.
-
-For applications requiring unambiguous localization across the full 20 kHz band, the vertical spacing would need to be reduced to approximately 8 millimeters. However, this would increase manufacturing difficulty and reduce the total vertical aperture, degrading elevation resolution. The chosen design prioritizes practical manufacturability and optimizes performance in the most critical frequency range.
-
-### Local Beamforming Capabilities
-
-Each vertical block of three microphones forms a uniform linear array (ULA) capable of performing beamforming in the elevation plane. For a ULA with $N$ elements spaced by distance $d$, the far-field array pattern when steering to angle $\theta_0$ from the array normal is given by:
-
-$$
-H(\theta, \omega) = \sum_{n=0}^{N-1} w_n e^{j \omega \tau_n}
-$$
-
-where $w_n$ are complex weights and $\tau_n = (n d \sin(\theta))/v_{\text{sound}}$ is the acoustic delay to element $n$. For a simple delay-and-sum beamformer with uniform weighting ($w_n = 1/N$), this simplifies to:
-
-$$
-H(\theta, \omega) = \frac{1}{N} \frac{\sin(N \omega d \sin(\theta) / (2 v_{\text{sound}}))}{\sin(\omega d \sin(\theta) / (2 v_{\text{sound}}))}
-$$
-
-The directivity pattern exhibits a main lobe centered at the steering angle $\theta_0$ and side lobes at angles where the path length differences equal integer multiples of the wavelength. The main lobe width at the -3 dB points is approximated by:
-
-$$
-\Delta\theta_{3\text{dB}} \approx \frac{0.886 \lambda}{(N-1)d}
-$$
-
-For our vertical array with $N=3$, $d=15$ millimeters, at a frequency of 1 kHz where $\lambda = 343$ millimeters:
-
-$$
-\Delta\theta_{3\text{dB}} \approx \frac{0.886 \times 343 \text{ mm}}{2 \times 15 \text{ mm}} \approx 10.1°
-$$
-
-This represents the angular resolution in elevation at 1 kHz. The beamwidth narrows at higher frequencies, reaching approximately 2.5 degrees at 4 kHz, our frequency of peak array gain. The directivity gain, which represents the improvement in signal-to-noise ratio achieved by coherent summation, is approximately:
-
-$$
-G_{\text{array}} = 10 \log_{10}(N) = 10 \log_{10}(3) \approx 4.8 \text{ dB}
-$$
-
-This 4.8 dB gain applies when the desired signal arrives from the steering direction and noise is spatially uncorrelated. In practice, gains of 3 to 4 dB are typical accounting for microphone mismatch and finite coherence of the desired signal.
-
-**[SVG DIAGRAM 4: Polar pattern of vertical beamforming showing the main lobe and side lobes at three frequencies: 500 Hz (wide beam), 2 kHz (medium), and 8 kHz (narrow). Include angular scale in degrees and magnitude scale in dB]**
-
-### Binaural Analysis for Azimuth Determination
-
-The 100 millimeter horizontal separation between left and right blocks enables binaural analysis for azimuth determination. For a sound source at azimuth angle $\phi$ measured from the frontal direction, the maximum interaural time difference for pure lateral incidence ($\phi = 90°$) is:
-
-$$
-\text{**ITD**}_{\text{max}} = \frac{d_{\text{separation}}}{v_{\text{sound}}} = \frac{0.10 \text{ m}}{343 \text{ m/s}} \approx 291 \text{ μs}
-$$
-
-For arbitrary azimuth angles, the **ITD** can be approximated under far-field conditions by:
-
-$$
-\text{**ITD**}(\phi) = \frac{d_{\text{separation}}}{v_{\text{sound}}} \sin(\phi)
-$$
-
-This relationship is valid when the source distance greatly exceeds the array dimensions, allowing treatment of the wavefront as planar. For sources within approximately two meters, near-field corrections become necessary to account for wavefront curvature.
-
-The angular resolution achievable through **ITD** analysis depends on the minimum detectable time difference, which is limited by sampling rate, signal-to-noise ratio, and correlation processing gain. With a sampling rate of 48 kHz providing temporal resolution of approximately 21 microseconds, and assuming signal-to-noise ratio of 20 dB enabling detection of time delays to approximately 10 microseconds through correlation processing, the theoretical angular resolution is:
-
-$$
-\Delta\phi_{\text{min}} = \arcsin\left(\frac{v_{\text{sound}} \times \Delta t_{\text{min}}}{d_{\text{separation}}}\right) = \arcsin\left(\frac{343 \text{ m/s} \times 10 \times 10^{-6} \text{ s}}{0.10 \text{ m}}\right) \approx 2.0°
-$$
-
-This calculation indicates that our geometry is capable of achieving the target angular resolution of 3 to 5 degrees with margin. In practice, reverberation, competing sources, and finite signal bandwidth will degrade performance from this theoretical limit, but the fundamental geometry provides adequate capability.
-
-The interaural level difference also contributes to azimuth determination, particularly at high frequencies where the wavelength becomes comparable to the array dimensions. For our 100 millimeter separation, ILD becomes significant above approximately:
-
-$$
-f_{\text{ILD}} = \frac{v_{\text{sound}}}{\pi d_{\text{separation}}} = \frac{343 \text{ m/s}}{\pi \times 0.10 \text{ m}} \approx 1.1 \text{ kHz}
-$$
-
-Above this frequency, each vertical block begins to shadow the other for lateral sources, creating level differences that complement **ITD** cues. The magnitude of ILD increases with frequency and angle, potentially reaching 10 to 15 dB for high-frequency pure lateral sources.
-
-**[SVG DIAGRAM 5: Top view showing plane waves arriving at different azimuth angles (0°, 30°, 60°, 90°) with visualization of path length differences between left and right blocks. Include time delay annotations and graphical wavefront representations]**
+The signal acquisition chain transforms acoustic pressure variations into digital representations suitable for processing and analysis. In our all-digital architecture, this transformation occurs primarily within the microphone packages themselves, with the microcontroller serving to collect, filter, and format the digital bitstreams.
 
 ## Digital Microphone Architecture
 
@@ -208,7 +68,7 @@ The small package size $3.76 \times 2.95 \times 1.00 \text{mm}$ permits dense pl
 
 ### Alternative Considerations
 
-We evaluated several alternative microphones during the selection process. The TDK InvenSense ICS-43434 offers similar specifications (65 dB SNR, 116 dB AOP) at lower cost but with I²S output rather than PDM. While I²S simplifies interface in some contexts, it consumes more GPIO pins on the microcontroller (requiring clock, word select, and data lines per stereo pair) compared to **PDM** which uses only clock and data with time-division multiplexing. For a six-channel system, this difference is significant.
+We evaluated several alternative microphones during the selection process. The TDK InvenSense ICS-43434 offers similar specifications (65 dB SNR, 116 dB AOP) at lower cost but with I²S output rather than PDM. While I²S simplifies interface in some contexts, it consumes more **GPIO** pins on the microcontroller (requiring clock, word select, and data lines per stereo pair) compared to **PDM** which uses only clock and data with time-division multiplexing. For a six-channel system, this difference is significant.
 
 The Knowles SPH0645LM4H-B provides 65 dB **SNR** with I²S output and has been widely used in hobbyist audio projects, establishing a track record of reliability. However, the frequency response shows earlier roll-off than the IM69D130, with -3 dB point around 15 kHz rather than 20 kHz. For applications requiring full audible bandwidth, the Infineon part provides better performance.
 
@@ -216,74 +76,166 @@ The STMicroelectronics MP34DT06J offers 64 dB **SNR** with **PDM** output at att
 
 I feel this pain in my cheapskate bones.
 
-## Engineering Rationale: ESP32-P4 vs. STM32H7
-
-My first impulse was to use the ESP32-P4, however, a deeper architectural analysis revealed that the initial cost advantages of the Espressif SoC would be negated by increased hardware complexity and potential risks to signal integrity. While the dual-core RISC-V architecture running at 400 MHz is impressive on paper, the specific requirements of a six-channel PDM microphone array for precise sound source localization align far better with the specialized peripherals found in the STM32H7 series. I feel this pain in my bones.
-
-### The PDM Interface and Hardware Filtering
-The most significant technical differentiator is the method of handling Pulse Density Modulation (PDM) data. The project relies on PDM microphones for their noise immunity and simplicity. The STM32H753 features the DFSDM (Digital Filter for Sigma-Delta Modulators) peripheral, a dedicated hardware block designed specifically to generate clock signals, receive 1-bit bitstreams, and perform decimation and filtering in hardware. This allows the capture of six synchronous audio channels directly into memory via DMA with virtually no CPU overhead.
-
-In contrast, utilizing the ESP32-P4 for the same task introduces unnecessary friction. While the P4 supports PDM, efficiently managing six synchronized channels typically requires significant software intervention for decimation or restricts the clock topology. To achieve the same "clean" integration as the STM32, the ESP32 implementation would likely require external codecs or complex software decimation loops that consume valuable processing cycles needed for the beamforming algorithms.
-
-### Clock Precision and Spatial Localization
-For a system designed to detect the angle of arrival of sound waves, the stability of the audio clock is not merely a matter of fidelity but of geometric accuracy. Sound source localization algorithms, such as GCC-PHAT, rely on minute phase differences between microphones. The STM32H7 series includes dedicated audio PLLs known for low jitter, allowing the microcontroller to act as a reliable clock master for the array.
-
-The ESP32 architecture historically exhibits higher internal PLL jitter, which introduces phase noise. While tolerable for standard voice recording, this phase noise translates directly into angular error in a compact beamforming array. Mitigating this on the ESP32-P4 would require inverting the clock topology to use an external high-precision crystal oscillator as the master, forcing the MCU into slave mode. This adds components to the Bill of Materials and complicates the PCB routing, whereas the STM32 handles this natively and robustly.
-
-### Development Ecosystem and PCB Simplicity
-The choice of the STM32H7 enables a direct "star" topology where the microcontroller connects directly to the microphones without intermediate silicon. This results in the cleanest possible HAT layout, reducing the risk of electromagnetic interference and minimizing points of failure. Furthermore, the firmware development benefits from the maturity of the ARM Cortex-M7 ecosystem, specifically the CMSIS-DSP libraries which offer highly optimized, battle-tested floating-point math functions essential for the real-time FFTs and correlation matrices used in the project. Porting these complex DSP chains to the newer RISC-V vector extensions represents a schedule risk that outweighs the unit cost savings of the processor.
-
-
-
-## Acquisition System Architecture
-
-The signal acquisition chain transforms acoustic pressure variations into digital representations suitable for processing and analysis. In our all-digital architecture, this transformation occurs primarily within the microphone packages themselves, with the microcontroller serving to collect, filter, and format the digital bitstreams.
-
 ### Block 1: Six IM69D130 **MEMS** Microphones
 
-The six IM69D130 microphones are arranged on the **PCB** according to the geometry discussed previously, with three forming the left block and three forming the right block. Each microphone operates independently but shares common clock and power rails to ensure synchronization.
+The six [IM69D130](https://www.infineon.com/assets/row/public/documents/24/49/infineon-im69d130-datasheet-en.pdf?fileId=5546d462602a9dc801607a0e46511a2e) microphones are arranged on the **PCBs** to allow the geometry discussed previously, with three forming the left block (left ear) and three forming the right block (right ear). Each microphone operates independently but shares common clock and power rails to ensure synchronization.
 
 The **PDM** clock for all six microphones is generated by the STM32H753 and distributed via a tree topology with controlled impedance traces. Operating at 2.4 MHz, this clock defines the sampling instant for all microphones simultaneously. The one-bit **PDM** data from each microphone flows on a dedicated data line back to the microcontroller.
 
-The **PDM** encoding represents the audio signal through density modulation of the bitstream. High audio levels produce bit patterns with more ones than zeros, while low levels produce more zeros than ones. A 1 kHz sine wave at moderate level might produce a pattern like 111110111101111011110..., while a DC offset would produce either all ones or all zeros depending on sign. This representation trades temporal resolution for amplitude resolution, requiring digital filtering to recover conventional PCM samples.
+The **PDM** encoding represents the audio signal through density modulation of the bitstream. High audio levels produce bit patterns with more ones than zeros, while low levels produce more zeros than ones. A $1 \text{ kHz}$ sine wave at moderate level might produce a pattern like 111110111101111011110..., while a DC offset would produce either all ones or all zeros depending on sign. This representation trades temporal resolution for amplitude resolution, requiring digital filtering to recover conventional **PCM** samples.
 
-The microphones require 1.8 volt supply, provided by a low-dropout regulator dedicated to this function. Current consumption of 650 microamperes per microphone yields total current of 3.9 milliamperes, well within the capability of small LDO regulators. Decoupling capacitors of 100 nanofarads are placed within 2 millimeters of each microphone power pin to suppress high-frequency supply noise that could couple into the **MEMS** transducer through substrate conduction.
+The microphones require at least $1.8 \text{ V}$ supply, provided by a low-dropout regulator dedicated to this function. Current consumption of $650 \mu\text{A}$ per microphone yields total current of $3.9 \text{ mA}$, well within the capability of small LDO regulators. Decoupling capacitors of $100 \text{ nF}$ are placed within $2 \text{ mm}$ of each microphone power pin to suppress high-frequency supply noise that could couple into the **MEMS** transducer through substrate conduction.
 
-**[SVG DIAGRAM 7: Block diagram showing the six IM69D130 microphones connected to the STM32H753. Show the shared **PDM** clock distribution tree and individual data return paths. Include power supply connections and decoupling capacitors]**
+![](\images\miksShcdV1.webp)**Individual IM69D130 microphone interface circuit showing power decoupling, PDM data line filtering, and L/R channel selection.**
 
-### Block 2: STM32H753 Microcontroller with DFSDM
+This is the technical breakdown of the acquisition circuit for each **IM69D130** digital MEMS microphone. The goal here is "canine-grade" hearing: high sensitivity, high dynamic range, and a noise floor low enough for precision 3D sound localization.
 
-The STM32H753ZIT6 microcontroller serves as the central processor for the system, handling acquisition, processing, and communication functions. This device integrates several peripherals specifically designed for multi-channel audio applications that make it particularly suitable for our requirements.
+**1. The Sensor: IM69D130 (MK1)**: we chose this for its $69 dB(A)$ SNR. In the MEMS world, this is top-tier. It allows the STM32H753 to "hear" subtle cues needed for GCC-PHAT algorithms. Besides it, there is the following key features:
+    * **Dynamic Range**: with an **A**coustic **O**verload **P**oint (**AOP**) of $130 dB$ **SPL**, the system won't clip during loud events like impulsive noises or nearby mechanical movement.
+    * **Digital Integrity**: since it converts the signal to **PDM** internally, we eliminate analog interference between the mic and the HAT—fundamental since we will have four servos nearby (two for each ear).
 
-The DFSDM (Digital Filter for Sigma-Delta Modulators) peripheral is the critical feature for **PDM** microphone interfacing. The STM32H753 includes four DFSDM channels, each capable of processing two **PDM** bitstreams through time-division multiplexing, providing capacity for eight microphones total. Each DFSDM channel includes:
+**2. Power Supply and Decoupling Strategy**: By following Infineon’s guidelines with this dual-capacitor approach, we ensure the microphone's internal clock doesn't pollute the power rail shared with the other 2 mics. in the same ear block:
+    * **$C1$ ($4.7 \mu F$)**: acts as a local bulk reservoir. It provides the necessary charge during fast current transients when the internal sigma-delta modulator is working hard.
+    * **$C2$ ($100 nF$)**: a high-frequency bypass. **This capacitor must be placed right against the VDD pin to filter out switching noise**. 
+    * **Design Logic**: 
 
-A configurable sinc filter that converts the **PDM** bitstream to PCM samples. The sinc filter implements a moving average over a window of **PDM** samples, performing the mathematical equivalent of decimation and anti-aliasing filtering. The decimation factor determines the relationship between **PDM** clock frequency and output sample rate. For our configuration with 2.4 MHz **PDM** clock and desired 48 kHz output:
+**3. PDM Data Line Treatment**: the **PDM** data line is a high-speed digital signal that requires careful handling to maintain signal integrity over the approximately $10\text{ cm}$ trace length to the STM32H753 microcontroller. We designed a filter to keeps the high-speed digital switching from interfering with the Raspberry Pi's sensitive electronics: 
+    * **$R1$ ($100 \Omega$)**: this damping resistor is essential to manage signal integrity. It slows down the edges of the **PDM** bitstream just enough to prevent ringing and overshoot, which is a major concern given our $10 \text{ cm}$ cable length.
+    * **$C3$ ($47 pF$)**: Works with $R1$ to form a low-pass filter (cutoff $\approx 33 MHz$). It suppresses electromagnetic interference (EMI) and ensures that the STM32 **DFSDM**, **D**igital **F**ilter for **S**igma-**D**elta **M**odulators (Filtro Digital para Moduladores Sigma-Delta)  receives a clean square wave instead of a noisy mess.
+    * **Pull-down Resistor ($R2$)**: the $100 \text{ k}\Omega$ resistor $R2$ in the schematic is essential. In stereo configurations in which two microphones share the same data line, this resistor ensures that the line does not remain floating (in high impedance) during the clock cycle in which the microphone is not transmitting bits.
+
+>**Cutoff Frequency Calculation ($f_c$) for the PDM Data Line**
+>
+>Based on the technical acquisition schematic, the data line for each **IM69D130** microphone uses a first-order passive low-pass filter to ensure signal integrity across the $10\text{ cm}$ trace to the microcontroller.
+>
+>The values defined in the design for the output stage of each microphone are:
+>* **Damping resistor (`<code>R1</code>`)**: $100 \Omega$
+>* **Filtering capacitor (`<code>C3</code>`)**: $47 pF$
+>
+>The cutoff frequency ($f_c$) is the point at which the signal amplitude is attenuated by $-3 \text{ dB}$. For an $RC$ filter, the formula is:
+>
+>$$
+>f_c = \frac{1}{2 \cdot \pi \cdot R_1 \cdot C_3}
+>$$
+>
+>$$
+>f_c = \frac{1}{2 \cdot \pi \cdot 100 \cdot (47 \cdot 10^{-12})}
+>$$
+>
+>$$
+>f_c \approx 33862753.8 \text{ Hz}
+>$$
+>
+>Rounding for technical clarity:
+>
+>$$
+>f_c \approx 33.86 \text{ MHz}
+>$$
+>
+>1.  **Pulse Integrity**: since the sampling clock is $2.4 \text{ MHz}$, the filter bandwidth is more than ten times the fundamental frequency. This allows the harmonics necessary to maintain a clean square wave—essential for edge detection in the **DFSDM** peripheral—to pass without excessive distortion.
+>2.  **EMI Control**: by limiting the bandwidth to approximately $33 \text{ MHz}$, the filter removes high-frequency noise and softens the rise and fall times. This significantly reduces electromagnetic interference (EMI) that could otherwise couple into the Raspberry Pi or the servo motor control systems.
+>3.  **Line Stability**: the $100 \Omega$ resistor provides impedance matching, which is vital to minimize overshoot and ringing caused by the parasitic inductance of the $10\text{ cm}$ conductors.
+
+**4. Shared PDM Clock**: the clock is fanned out from the STM32 to all microphones. While not shown in this specific sub-block, the $47 \Omega$ source termination resistor we placed at the MCU output is determinant for keeping this clock stable across the entire array.
+
+**5. Stereo Configuration (L/R Select)**
+* **Jumper $J2$**: This pin defines the data multiplexing logic.
+    * **Tie to 3.3V**: Data is asserted on the **rising** edge of the clock (Left channel).
+    * **Tie to GND**: Data is asserted on the **falling** edge of the clock (Right channel).
+* **Application**: This allows us to pair two microphones on a single data line, doubling our channel density without increasing the pin count on the STM32.
+
+### Block 2: Microphone Power Supply Circuit (TPS7A2033DQN LDO)
+
+![](\images\mikPowerShcdV1.webp)**Figure 8: Individual IM69D130 microphone interface circuit showing power decoupling, PDM data line filtering, and L/R channel selection.**
+
+The schematic in Figure 8 shows the dedicated low-dropout regulator (LDO) circuit used to power one block of three IM69D130 microphones (left ear). An identical circuit is replicated for the right ear block. This design prioritizes ultra-low noise, high **P**ower **S**upply **R**ejection **R**atio, **PSRR**, and excellent transient response, critical for preserving the microphone's $69 \text{ dB(A)}$ SNR in a system with nearby digital activity and servo motors.
+
+**1. Regulator Choice: U4 – [TPS7A2033DQN](https://www.ti.com/lit/ds/symlink/tps7a20.pdf) (Texas Instruments)**
+- Fixed 3.3 V output variant of the TPS7A20 family in a small 10-pin X2SON (DQN) package.
+- **Characteristics**:
+  - Output noise: **7 μV RMS** ($10 \text{ Hz}\rightarrow 100 \text{ kHz}$), among the lowest available in **LDOs**.
+  - **PSRR**: $>90 \text{ dB}$ at $1 \text{ kHz}\rightarrow 10 \text{ kHz}$, $>60 \text{ dB}$ at $10 \text{ kHz}\rightarrow 1 \text{ MHz}$. Effectively rejects ripple and switching noise from the incoming $5 \text{ V}$ rail (derived from Raspberry Pi GPIO).
+  - Quiescent current: only $6.5 \mu\text{A}$, negligible contribution to overall power budget.
+  - Maximum output current: $300 \text{ mA}$, ample margin for three microphones ($\approx .95 \text{ mA}$ total) plus transients.
+  - Dropout voltage: $\approx 110 \text{ mV}$, typical at $300 \text{ mA}$, ensures stable $3.3 \text{ V}$ even if input drops slightly.
+- **Why this LDO?** the combination of ultra-low noise and high **PSRR** is essential to prevent power-supply-induced modulation of the **MEMS** transducer, which would directly degrade **SNR** and introduce artifacts in beamforming/DOA processing.
+
+**2. Input Filtering and Protection**
+- **FB1**: $600 Ω$ SMD ferrite bead (0603/0805 package)
+  - Placed in series at the input (`VDD_IN`).
+  - Acts as a high-frequency filter to block EMI and switching noise from the $5 \text{ V}$ rail.
+  - Low DC resistance preserves voltage headroom.
+- **C29**: 10 μF tantalum capacitor
+  - Provides bulk energy storage at the **LDO** input.
+  - Handles low-frequency transients and stabilizes the input during load steps.
+  - Tantalum chosen for high capacitance in small footprint and stable ESR.
+- **C25 (1 μF X7R) + C31 (100 nF X7R)**:
+  - Parallel ceramic capacitors for mid and high-frequency decoupling.
+  - Low **E**quivalent **S**eries **R**esistance, **ESR**, ensures fast response to switching transients.
+  - Placed close to the `IN` pin as per [datasheet](https://www.ti.com/lit/ds/symlink/tps7a20.pdf) recommendation.
+
+**3. Output Decoupling**
+- **C26**: $2.2 \mu\text{F}$ tantalum capacitor
+  -X7R ceramic (0805/0603, $10 \text{ V}$ rating)
+  - Primary output capacitor.
+  - Value within TI's recommended range ($1\rightarrow 10 \mu\text{F}$) for stability and optimal transient response.
+  - Ensures low output impedance across audio frequencies and suppresses any residual **LDO** noise.
+
+**4. Enable Control**
+- **EN_LEFT** signal connected to pin 3 (`EN`):
+  - Active-high enable (smart pulldown internal to TPS7A20).
+  - Allows software control from STM32 **GPIO** if desired (e.g., power gating one ear block for low-power modes or fault isolation).
+  - For always-on operation, tie directly to `VDD_IN` or `OUT`.
+
+**5. Grounding and Layout Considerations**
+- All `GND` connections return to a solid ground plane.
+- Thermal pad of the **DQN** package must be soldered to `GND` with multiple vias for heat dissipation (though power dissipation is negligible: $\approx 0.65 \text{ V}$ \times 2 \text{ mA} \approx 1.3 \text{ mW}$).
+
+**Design Logic Summary**
+- Separate **LDO** per ear block isolates left/right microphone groups, preventing crosstalk through shared supply during asymmetric acoustic events.
+- Ultra-low-noise regulation ensures the full $69 \text{ dB(A)}$ **SNR** of the IM69D130 is preserved right up to the PDM conversion stage.
+- Robust input filtering protects against Raspberry Pi power supply ripple and potential servo-induced noise on the common 5 V rail.
+
+Although a single ultra-low-noise **LDO** with shared input filtering could technically supply clean $3.3 \text{ V}$ to the power to all six IM69D130 microphones and the STM32H753 while staying well within the regulator’s $300 \text{ mA}$ current capability, the decision to implement three identical and independent LDO circuits—one dedicated to the left-ear microphone block (three microphones), one to the right-ear block, and one exclusively to the STM32H753, was **driven by noise isolation and robustness considerations critical to high-fidelity spatial audio**. By separating the power domains, any transient current draw from the STM32 during intensive **DSP** operations, **USB** High-Speed activity, or **GPIO** toggling (including future servo **PWM** drive) is prevented from coupling into the microphone supply rails, where even microvolt-level disturbances could modulate the MEMS transducers and degrade the achievable $69 \text{ dB(A)}$ **SNR**. Similarly, asymmetric acoustic events that cause uneven current demand between the left and right microphone groups are fully isolated, eliminating potential inter-channel crosstalk through the power supply. **This triple-LDO approach, while using slightly more board space and components, provides superior channel separation, maximizes the effective dynamic range and directional accuracy of the array, and aligns with professional audio design practices where analog-front-end purity takes precedence over minimal component count**.
+
+## STM32H753 Microcontroller with **DFSDM**
+
+The [STM32H753ZIT6](https://www.st.com/resource/en/datasheet/stm32h753vi.pdf) **single core Arm Cortex-M7 microcontroller**, in the LQFP144 package, serves as the central processor for the system, handling multi-channel PDM acquisition, real-time digital signal processing, direction-of-arrival estimation, and USB Audio Class 2.0 communication. The choice of the 144-pin LQFP package—rather than the more compact LQFP100 or BGA alternatives—was deliberate to maximize peripheral accessibility and design flexibility while maintaining excellent manufacturability and thermal performance. The LQFP144 provides full exposure to the device's extensive feature set, including **eight **DFSDM** channels (sufficient for all six microphones plus margin for future expansion), multiple high-resolution timers for precise servo PWM generation (four independent channels for the two-degree-of-freedom ear mechanisms), dedicated USB High-Speed PHY pins with integrated transceivers, and a rich selection of GPIOs for debugging, status LEDs, or additional sensors**. This pin count ensures that critical high-speed signals (**PDM** clock/data lines, **USB DM/DP**) can be routed with minimal layering constraints and optimal signal integrity, while avoiding the higher cost, assembly complexity, and thermal challenges associated with BGA packages. Furthermore, the larger LQFP144 footprint facilitates superior heat dissipation during sustained $480 \text{ MHz}$ operation and simplifies prototyping and rework.
+
+### **DFSDM** Peripheral Overview
+
+The **DFSDM** (**D**igital **F**ilter for **S**igma-**D**elta Modulators) peripheral is the critical feature for **PDM** microphone interfacing. The STM32H753 includes four **DFSDM** channels, each capable of processing two **PDM** bitstreams through time-division multiplexing, providing capacity for eight microphones total. Each **DFSDM** channel includes:
+
+A configurable sinc filter that converts the **PDM** bitstream to **PCM** samples. The sinc filter implements a moving average over a window of **PDM** samples, performing the mathematical equivalent of decimation and anti-aliasing filtering. The decimation factor determines the relationship between **PDM** clock frequency and output sample rate. For our configuration with $2.4 \text{ MHz}$ **PDM** clock and desired 48 kHz output:
 
 $$
 \text{Decimation factor} = \frac{f_{\text{PDM}}}{f_{\text{sample}}} = \frac{2400000 \text{ Hz}}{48000 \text{ Hz}} = 50
 $$
 
-An integrator stage that can implement additional filtering beyond the basic sinc response. The integrator order can be configured from 1 to 5, with higher orders providing steeper roll-off in the anti-aliasing filter at the cost of increased group delay. We typically use third-order integration as a compromise between filter performance and latency.
+An integrator stage that can implement additional filtering beyond the basic sinc response. The integrator order can be configured from $1$ to $5$, with higher orders providing steeper roll-off in the anti-aliasing filter at the cost of increased group delay. We typically use third-order integration as a compromise between filter performance and latency.
 
-An offset correction circuit that removes DC bias from the signal path. **MEMS** microphones exhibit small DC offsets in their **PDM** output due to mechanical asymmetries and circuit mismatches. The DFSDM can measure and subtract these offsets automatically.
+An offset correction circuit that removes DC bias from the signal path. **MEMS** microphones exhibit small DC offsets in their **PDM** output due to mechanical asymmetries and circuit mismatches. The **DFSDM** can measure and subtract these offsets automatically.
 
-A direct memory access (DMA) interface that transfers converted samples to RAM without CPU intervention. Each DFSDM channel can trigger DMA transfers at the output sample rate, filling circular buffers that the CPU processes when complete blocks are available. This architecture allows the CPU to remain in low-power sleep states during quiescent periods, waking only when processing is required.
+A **D**irect **M**emory **A**ccess (DMA) interface that transfers converted samples to RAM without CPU intervention. Each **DFSDM** channel can trigger DMA transfers at the output sample rate, filling circular buffers that the CPU processes when complete blocks are available. This architecture allows the CPU to remain in low-power sleep states during quiescent periods, waking only when processing is required.
 
-The STM32H753 operates at 480 MHz with a Cortex-M7 core featuring superscalar dual-issue pipeline and single-precision floating-point unit. The manufacturer specifies performance of approximately 1.025 DMIPS per MHz, yielding total performance of approximately 492 DMIPS. However, this figure represents best-case performance on carefully optimized benchmarks. For mixed workloads including audio processing, realistic sustained performance is approximately 300 to 400 MIPS, which we use for capacity planning.
+The STM32H753 operates at $480 \text{ MHz}$ with a Cortex-M7 core featuring superscalar dual-issue pipeline and single-precision floating-point unit. The manufacturer specifies performance of approximately $1.025 \text{ DMIPS}$ per $\text{ MHz}$, yielding total performance of approximately $492 \text{ DMIPS}$. However, this figure represents best-case performance on carefully optimized benchmarks. For mixed workloads including audio processing, realistic sustained performance is approximately 300 to 400 MIPS, which we use for capacity planning.
 
-The device includes 1024 kilobytes of SRAM distributed across several domains with different access speeds. For audio processing, we primarily use the tightly-coupled data memory (DTCM) which provides single-cycle access for optimal loop performance. The large memory capacity allows implementing substantial buffering to absorb timing variations and enable batch processing for efficiency.
+>**DMIPS** significa **D**hrystone **MIPS** (ou **D**hrystone **M**illion **I**nstructions **P**er **S**econd).
+É uma unidade de medida de desempenho de processadores, baseada no benchmark Dhrystone, um teste sintético criado nos anos 1980 para avaliar a velocidade de execução de código inteiro (sem ponto flutuante) em sistemas embarcados e microcontroladores.
 
-### Data Flow and Buffer Management
+The device includes $1024 \text{ kilobytes}$ of SRAM distributed across several domains with different access speeds. For audio processing, we primarily use the tightly-coupled data memory (**DTCM**) which provides single-cycle access for optimal loop performance. The large memory capacity allows implementing substantial buffering to absorb timing variations and enable batch processing for efficiency.
+
+#### Data Flow and Buffer Management
 
 The data flow from microphones to processed output follows a carefully orchestrated pipeline designed to minimize latency while maintaining processing efficiency. Understanding this pipeline is critical to appreciating the real-time performance capabilities of the system.
 
-Each DFSDM channel outputs 48 kHz samples in 24-bit format, though the effective resolution is lower due to the inherent noise of the **MEMS** transducer and quantization in the **PDM** modulator. The six channels (three pairs through three DFSDM modules) produce:
+Each **DFSDM** channel outputs 48 kHz samples in 24-bit format, though the effective resolution is lower due to the inherent noise of the **MEMS** transducer and quantization in the **PDM** modulator. The six channels (three pairs through three **DFSDM** modules) produce:
 
 $$
 \text{Data rate} = 6 \text{ channels} \times 3 \text{ bytes/sample} \times 48000 \text{ samples/s} = 864000 \text{ bytes/s} \approx 844 \text{ kB/s}
 $$
 
-This data rate is modest by modern standards but requires continuous attention to avoid buffer overruns. The DFSDM peripherals transfer samples via DMA to circular buffers in SRAM. We configure buffers of 512 samples per channel (10.67 milliseconds at 48 kHz), providing adequate time for processing while limiting latency.
+This data rate is modest by modern standards but requires continuous attention to avoid buffer overruns. The **DFSDM** peripherals transfer samples via DMA to circular buffers in SRAM. We configure buffers of 512 samples per channel (10.67 milliseconds at 48 kHz), providing adequate time for processing while limiting latency.
 
 The DMA controller is configured to generate an interrupt when each half-buffer completes. This half-buffer scheme enables the CPU to process one half while the DMA fills the other, implementing a classic double-buffering pattern. The interrupt service routine triggers processing tasks that consume the completed half-buffer.
 
@@ -291,7 +243,50 @@ Processing occurs in 256-sample blocks (5.33 milliseconds). This block size repr
 
 After processing, the data is formatted for transmission via USB according to the selected operating mode. The USB Audio Class 2.0 interface consumes processed audio from circular buffers using isochronous transfers that guarantee bandwidth but do not retransmit lost packets. Buffer management must ensure that data is always available when the USB host requests it, requiring careful tuning of buffer depths to absorb timing jitter in the USB polling.
 
-**[SVG DIAGRAM 8: Data flow diagram showing the complete path from **PDM** bitstream through DFSDM filtering, DMA transfer to SRAM buffers, CPU processing blocks (beamforming, DOA, event detection), and final USB output. Include timing annotations showing latency at each stage]**
+### Power Supply Scheme
+
+The STM32H753 microcontroller requires a stable $3.3 \text{ V}$ supply with low noise and high transient response to support high-speed operation and sensitive analog peripherals. We implement a dedicated low-dropout regulator (**LDO**) circuit using the [TPS7A2033DQN](https://www.ti.com/lit/ds/symlink/tps7a20.pdf) device, identical to the microphone power.
+
+![](\images\STMPowerShcdV1.webp)**Figure 9: STM32H753 microcontroller power supply circuit using TPS7A2033DQN LDO.**
+
+The Figure 9 schematic shows the dedicated power supply circuit for the STM32H753ZITx microcontroller, employing the **same ultra-low-noise LDO topology** previously analyzed for the microphone blocks (left and right ear groups). This deliberate reuse of an identical circuit—featuring the TPS7A2033DQN regulator—ensures consistent electrical characteristics across all three power domains while providing targeted isolation tailored to the MCU's distinct load profile.
+
+By standardizing on the same proven **LDO** family, the design benefits from unified **BOM**, layout symmetry, and guaranteed matching of critical noise parameters. The regulator's $300 \text{ mA}$ capacity comfortably exceeds the STM32H753's typical $150 \rightarrow 250 \text{ mA}$ demand during full $480 \text{ MHz}$ operation with **DFSDM**, **USB HS**, and timer activity.
+
+**1. Regulator Reuse: TPS7A2033DQN**: identical to the microphone **LDOs**, this fixed $3.3 \text{ V}$ variant of the TPS7A2033DQN regulator in the compact X2SON (DQN) package delivers **7 μV RMS** output noise and **>90 dB PSRR** at low frequencies.
+
+**2. Input Filtering – Identical to Microphone Circuits**
+- **FB3** ($600 \Omega$ SMD ferrite bead), **C34** ($10 \mu\text{F}$ tantalum bulk), **C35** ($1 \mu\text{F}$ X7R), and **C36** ($100 \text{ nF}$ X7R) mirror the microphone input stage exactly. This multi-stage filtering (ferrite for HF EMI + tantalum for low-frequency stability + ceramics for fast transients) maximizes effective     ower **S**upply **R**ejection **R**atio, **PSRR**, against ripple from the Raspberry Pi's $5 \text{ V}$ **GPIO** rail. Equally important here to prevent power-supply modulation of internal STM32 clocks and analog references.
+
+**3. Output Decoupling – Consistent Approach**: the **C37** ($2.2 \mu\text{F}$ X7R) matches the microphone output capacitors. This consistency: provides identical low-impedance characteristics, ensuring excellent transient response to the MCU's bursty current profile (e.g., during intensive audio processing or USB packet bursts).
+
+**4. Enable Pin**: for always-on HAT operation, this pin is connect directly to `VDD_IN` ($5 \text{ V}$ rail) as recommended for the microphone **LDOs**.
+
+**5. Strategic Domain Separation**: while the circuit is physically identical to the microphone supplies, its **dedicated implementation** isolates the STM32's higher and more dynamic digital load from the ultra-sensitive microphone rails.
+- This prevents potential noise coupling from MCU switching activity (core, USB PHY, GPIO) back into the IM69D130 transducers, preserving the full $69 \text{ dB(A)}$ **SNR** and channel separation essential for accurate beamforming and direction-of-arrival estimation.
+
+Reusing the proven microphone power circuit for the STM32 guarantees consistent ultra-low-noise performance across the entire signal chain while the physical separation of regulators achieves optimal domain isolation. This balanced approach—standardization for reliability and partitioning for noise immunity—represents a professional-grade solution for mixed-signal audio applications on a compact Raspberry Pi HAT.
+
+![](\images\STMPowerDistShcdV1.webpp)**Figure 10: STM32H753ZITx microcontroller 3.3 V power distribution and decoupling network.**
+
+The Figure 10 schematic fragment shows the final $3.3 \text{ V}$ power distribution and decoupling network for the STM32H753ZITx (LQFP144 package) on the Raspberry Pi HAT. This design follows STMicroelectronics guidelines ([AN4938](https://www.st.com/resource/en/application_note/an4938-getting-started-with-stm32h74xig-and-stm32h75xig-mcu-hardware-development-stmicroelectronics.pdf) and [datasheet](https://www.st.com/resource/en/datasheet/stm32h753vi.pdf)) while incorporating practical enhancements for low-noise operation in a mixed-signal audio environment.
+
+**1. Power Source and Final Filtering**: the `VDD_STM_3.3` rail originates from the dedicated TPS7A2033DQN LDO (previously analyzed).
+- **FB4** ($600 \Omega$ SMD ferrite bead): placed in series near the MCU power entry. Provides final high-frequency isolation, preventing any residual noise from the LDO output or external coupling from propagating into the MCU's multiple **VDD** pins. Complements the LDO's **PSRR** for ultra-clean supply at the point of load.
+- **C52 (1 μF X7R) + C53 (10 nF X7R) + C55 (100 nF X7R)**: local high-frequency decoupling immediately after the ferrite. Forms a progressive filtering stage with decreasing capacitance for broad-spectrum noise suppression.
+
+**2. Per-Pin Decoupling Strategy**
+- **12 × 100 nF ceramic capacitors** (**C38–C48**, labeled as $100 \text{ nF}$): one placed as close as possible to **each `VDD` pin** of the STM32H753 (pins `11`, `27`, `52`, `77`, `100`, plus `VDDA` and others). Attending the standard [ST](https://www.st.com/) recommendation: $100 \text{ nF}$ per power pin to bypass high-frequency switching noise generated by the Cortex-M7 core and peripherals. **Critical for maintaining low impedance across the die at GHz-range internal transients**.
+- **C49**: $4.7 \mu\text{F}$ X7R ceramic (0805/0603, 10 V). Bulk capacitor shared across all `VDD` pins. Provides mid-frequency energy reservoir for load steps (e.g., during **USB** bursts or **DFSDM** processing).
+
+**3. Overall Decoupling Philosophy**: this approach minimizes power plane impedance across all frequencies, reducing voltage droops and ground bounce—essential for stable $480 \text{ MHz}$ operation and clean **USB** High-Speed signaling. Based in a Multi-capacitor hierarchy:
+  - Bulk ($4.7 \mu\text{F}$) for low-frequency stability;
+  - Per-pin $100 \text{ nF}$ for localized high-frequency bypassing;
+  - Additional ceramics post-ferrite for final polishing.
+
+**4. Additional Notes**
+- All capacitors are **X7R dielectric** (temperature-stable, low ESR) with $10 \text{ V}$ rating for margin above $3.3 \text{ V}$.
+- Layout implication: The note about equidistant placement of C49 ensures symmetrical current distribution, preventing voltage gradients across the package.
 
 ### Clock Architecture
 
@@ -303,7 +298,7 @@ $$
 f_{\text{PDM}} = \frac{f_{\text{master}} \times \text{PLL multiplier}}{\text{Divider}} = \frac{25 \text{ MHz} \times 96}{1} \div 1000 = 2.4 \text{ MHz}
 $$
 
-The relationship between **PDM** clock and sample rate is fixed by the DFSDM decimation factor, ensuring that sample rate tracks any variations in the master clock. This means temperature drift or aging of the crystal affects all channels identically, maintaining phase coherence.
+The relationship between **PDM** clock and sample rate is fixed by the **DFSDM** decimation factor, ensuring that sample rate tracks any variations in the master clock. This means temperature drift or aging of the crystal affects all channels identically, maintaining phase coherence.
 
 The crystal oscillator selected is a standard AT-cut crystal with ±20 ppm initial tolerance and ±5 ppm temperature stability over the operating range. This translates to frequency variation of:
 
@@ -351,15 +346,8 @@ Latency in the USB transport comes from buffering required to match the asynchro
 
 The UAC 2.0 implementation uses the TinyUSB stack, an open-source USB device stack specifically designed for embedded systems. TinyUSB provides well-tested implementations of UAC 2.0 descriptors and transfer management, significantly reducing development effort compared to writing USB code from scratch. The stack has been validated with thousands of different USB host implementations, providing confidence in compatibility.
 
-**[SVG DIAGRAM 9: Block diagram of the complete architecture showing the 6 microphones, STM32H753 with internal DFSDM blocks, USB PHY, and connection to Raspberry Pi. Include data rate annotations at each interface and highlight the power supply distribution]**
+**[SVG DIAGRAM 9: Block diagram of the complete architecture showing the 6 microphones, STM32H753 with internal **DFSDM** blocks, USB PHY, and connection to Raspberry Pi. Include data rate annotations at each interface and highlight the power supply distribution]**
 
-## Rationale for Choosing the Three TI Voltage Regulators
-
-The selection of three Texas Instruments (TI) low-dropout (LDO) voltage regulators—one TPS7A4700 for generating 3.3V from the Raspberry Pi's 5V rail and two TPS7A33 for separate 1.8V supplies (one for the microphones and one for the STM32H753's analog sections)—is driven by the project's stringent requirements for ultra-low-noise power delivery, which is essential for achieving high-fidelity audio capture, precise spatial localization, and low-latency processing. 
-
-Although the Raspberry Pi provides 5V and 3.3V rails directly through the GPIO header, these are prone to ripple and high-frequency noise (typically 50-100 mV peak-to-peak up to 1 MHz) from its switching regulators, CPU activity, USB peripherals, and other components, which can easily couple into sensitive elements like the IM69D130 MEMS microphones and the STM32H753's DFSDM peripheral. This noise would degrade the system's targeted 105-120 dB dynamic range, 69 dB SNR, and flat 20 Hz-20 kHz frequency response, potentially introducing artifacts that compromise the 3-5° angular resolution in azimuth or the sub-20 ms latency for detecting events like explosions or aircraft. 
-
-The TI regulators address this with exceptional performance, offering ultra-low output noise (<4.17 µV RMS from 10 Hz to 100 kHz) and high power supply rejection ratio (PSRR >70 dB up to 1 MHz), effectively isolating the project's components from the Pi's noisy rails while ensuring stable voltages for faithful signal processing. By providing separate clean rails, they maintain phase coherence across the microphones for accurate interaural time and level differences (ITD/ILD), align with the "all-digital low-noise architecture" philosophy, and support the overall bill-of-materials cost target of approximately $60, making them a deliberate choice to prioritize audio fidelity and robustness over simplicity in this HAT design.
 
 ## Printed Circuit Board Design
 
@@ -430,7 +418,7 @@ $$
 
 where $v_{\text{prop}} = c/\sqrt{\epsilon_{r,\text{eff}}}$ is the propagation velocity in microstrip with effective dielectric constant of approximately 3.5. This 88 picosecond skew between the nearest and farthest microphones is negligible compared to the 417 nanosecond period of the 2.4 MHz clock (representing 0.02% of a clock cycle), confirming that all microphones sample synchronously despite the tree distribution.
 
-The **PDM** data lines return from each microphone to dedicated GPIO pins on the microcontroller. These traces are routed with moderate care to avoid crosstalk but do not require differential pairing or impedance control. The data changes on the falling edge of the **PDM** clock and is sampled by the microcontroller on the rising edge, providing half a clock period (208 nanoseconds) of setup time, far exceeding the few nanoseconds typically required.
+The **PDM** data lines return from each microphone to dedicated **GPIO** pins on the microcontroller. These traces are routed with moderate care to avoid crosstalk but do not require differential pairing or impedance control. The data changes on the falling edge of the **PDM** clock and is sampled by the microcontroller on the rising edge, providing half a clock period (208 nanoseconds) of setup time, far exceeding the few nanoseconds typically required.
 
 The USB data signals (D+ and D-) form a differential pair that must be routed as matched-length, controlled-impedance transmission lines. USB 2.0 High-Speed specifies 90 ohms differential impedance. For our **PCB** stack-up, this is achieved with trace widths of approximately 0.15 millimeters and spacing of 0.12 millimeters. The traces are routed as short and direct as possible, with length matching within 0.5 millimeters to maintain phase alignment.
 
@@ -630,7 +618,7 @@ Total: 18432 + 6144 + 39000 + 3000 + 10000 + 360000 = 436576 operations
 
 This represents only 12.2% of the available 3.58 million operations per frame, leaving enormous margin for additional processing such as adaptive beamforming, noise suppression, or more sophisticated event detection algorithms. The design is intentionally over-provisioned to ensure reliable real-time operation even under worst-case conditions.
 
-**[SVG DIAGRAM 15: Computational budget pie chart showing the percentage allocation of processing time: DFSDM processing (5%), Beamforming (2%), GCC-PHAT (11%), Event Detection (1%), USB Management (3%), Overhead (10%), and Unused Margin (68%)]**
+**[SVG DIAGRAM 15: Computational budget pie chart showing the percentage allocation of processing time: **DFSDM** processing (5%), Beamforming (2%), GCC-PHAT (11%), Event Detection (1%), USB Management (3%), Overhead (10%), and Unused Margin (68%)]**
 
 ### Latency Analysis
 
@@ -646,7 +634,7 @@ $$
 
 This is negligible compared to other latencies.
 
-**DMA and buffering latency**: Samples are transferred from DFSDM to RAM via DMA and accumulate in buffers until a complete frame of 512 samples is available for processing. Average latency is half the frame duration:
+**DMA and buffering latency**: Samples are transferred from **DFSDM** to RAM via DMA and accumulate in buffers until a complete frame of 512 samples is available for processing. Average latency is half the frame duration:
 
 $$
 \tau_{\text{buffer}} = \frac{512}{2 \times 48000} = 5.33 \text{ ms}
@@ -712,7 +700,7 @@ $$
 
 This specification indicates flat response across the critical mid-band where human speech and most acoustic events concentrate their energy, with gradual roll-off at the extreme high frequencies. The ±3 dB tolerance at 20 kHz means that some units may exhibit response as low as -3 dB while others are as high as +3 dB, a 6 dB spread. This variability is typical of **MEMS** microphones and can be calibrated out if necessary by measuring each unit and applying equalization.
 
-The DFSDM filtering introduces additional high-frequency attenuation beyond the microphone response. The sinc filter has magnitude response:
+The **DFSDM** filtering introduces additional high-frequency attenuation beyond the microphone response. The sinc filter has magnitude response:
 
 $$
 |H(f)| = \left|\frac{\sin(\pi f / f_s)}{\pi f / f_s}\right|
@@ -794,7 +782,7 @@ The firmware implements multiple operating modes to serve different application 
 
 ### Mode 1: Raw Streaming
 
-In raw streaming mode, all six microphone channels are transmitted to the host computer at 48 kHz sample rate with 24-bit resolution. No processing occurs beyond the DFSDM filtering inherent in PDM-to-PCM conversion. This mode serves several purposes:
+In raw streaming mode, all six microphone channels are transmitted to the host computer at 48 kHz sample rate with 24-bit resolution. No processing occurs beyond the **DFSDM** filtering inherent in PDM-to-PCM conversion. This mode serves several purposes:
 
 **Hardware validation**: During system bring-up, raw streaming allows verification that all six microphones are functioning and properly synchronized. Captured data can be analyzed offline to measure channel matching, frequency response, and noise floors.
 
@@ -972,7 +960,7 @@ This project demonstrates that sophisticated spatial audio systems can be implem
 | **Voltage Regulator** | **TI TPS7A4700**                 | 1        | 5V to 3.3V low-noise. OK.                                                          |
 | **Voltage Regulator** | **TI TPS7A33**                   | 2        | 3.3V to 1.8V (Mics + Analog). Corrected from 3301.                                 |
 | **Clock/Timing**      | **25 MHz Crystal**               | 1        | ±20ppm. OK.                                                                         |
-| **Connector**         | **2x20 Pin GPIO Header**         | 1        | Pass-through. OK.                                                                   |
+| **Connector**         | **2x20 Pin **GPIO** Header**         | 1        | Pass-through. OK.                                                                   |
 | **Connector**         | **USB-C Receptacle**             | 1        | For USB Audio output. Added.                                                        |
 | **Passive (Caps)**    | **Ceramic Capacitor 10µF**       | ~15      | Bulk decoupling. OK.                                                                |
 | **Passive (Caps)**    | **Ceramic Capacitor 100nF**      | ~30      | Local decoupling. OK.                                                               |
