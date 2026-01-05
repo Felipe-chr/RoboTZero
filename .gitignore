@@ -4,6 +4,7 @@ buildDocs.py
 # IDE and editor folders
 .vscode/
 .idea/
+.frontmatter/
 *.swp
 *.swo
 *~
