@@ -2,4 +2,5 @@
   (version 7)
   (lib (name "TPS7A4700")(type "KiCad")(uri "D:/OneDrive/Projetos/RoboTZero/AuralFocus/TPS7A4700RGWR/TPS7A4700RGWR.kicad_sym")(options "")(descr ""))
   (lib (name "MCU_ST_STM32H7")(type "KiCad")(uri "C:/Projetos/RoboTZero/AuralFocus/MCU_ST_STM32H7.kicad_sym")(options "")(descr ""))
+  (lib (name "2026-01-05_21-14-23")(type "KiCad")(uri "C:/Projetos/RoboTZero/AuralFocus/ul_SMBJ5-0A-TR/KiCADv6/2026-01-05_21-14-23.kicad_sym")(options "")(descr ""))
 )
